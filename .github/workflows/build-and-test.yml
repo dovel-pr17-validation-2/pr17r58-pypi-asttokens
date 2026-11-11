@@ -1,0 +1,132 @@
+name: Build and test
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - 3.8
+          - 3.9
+          - '3.10'
+          - 3.11
+          - 3.12
+          - 3.13
+          # As per https://github.com/actions/virtual-environments/blob/main/images/linux/Ubuntu2004-Readme.md#pypy list of versions
+          - pypy-3.9
+          - pypy-3.10
+        astroid-version:
+          - ''
+        include:
+          # Test recent Python on Astroid v2 and v3 too (the above natural tests will
+          # pick up the latest Astroid version for these Python versions)
+          - python-version: '3.8'
+            astroid-version: '<3'
+          - python-version: '3.9'
+            astroid-version: '<3'
+          - python-version: '3.10'
+            astroid-version: '<3'
+          - python-version: '3.11'
+            astroid-version: '<3'
+          - python-version: '3.12'
+            astroid-version: '<3'
+          - python-version: '3.13'
+            astroid-version: '<3'
+          - python-version: 'pypy-3.10'
+            astroid-version: '<3'
+          - python-version: '3.10'
+            astroid-version: '<4'
+          - python-version: '3.12'
+            astroid-version: '<4'
+          - python-version: '3.13'
+            astroid-version: 'none'
+          - python-version: '3.14'
+
+    env:
+      COVERALLS_PARALLEL: true
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          allow-prereleases: true
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade coveralls "pytest<9.0" setuptools setuptools_scm pep517
+          if [ '${{ matrix.astroid-version }}' = 'none' ]; then
+            pip install '.[test-no-astroid]'
+            python -c "import importlib.util; assert importlib.util.find_spec('astroid') is None"
+          else
+            pip install '.[test]' 'astroid${{ matrix.astroid-version }}'
+          fi
+
+      - name: Mypy testing
+        # Skip testing mypy on pypy since mypy no longer installs there, and
+        # type-checking on pypy is anyway redundant with CPython jobs.
+        if: ${{ !startsWith(matrix.python-version, 'pypy') }}
+        run: |
+          pip install "mypy>=1.10"
+          python -m mypy asttokens tests/*.py
+
+      - name: Fast tests with coverage
+        run: |
+          pytest --cov -n auto -m "not slow"
+          coverage report -m
+
+      - name: Slow tests without coverage
+        run: |
+          pytest -n auto -m slow
+
+      - name: Collect coverage results
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pip3 install --upgrade coveralls
+          python3 -m coveralls --service=github
+
+  docs:
+    # Note: CI build must must be kept in sync with the equivalent ReadTheDocs
+    # configuration in `.readthedocs.yaml`
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+
+        # Astral uv is pip-compatible but *much* faster
+      - uses: astral-sh/setup-uv@v10.3.0
+        id: setup-python-uv
+        with:
+          python-version: 3.11
+
+      - name: Setup virtualenv
+        run: uv venv
+
+      - name: Install dependencies
+        id: install-dependencies
+        run: uv pip install . -r docs/requirements.txt
+
+      - name: Build docs
+        run: uv run sphinx-build -M html docs docs/_build
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: ./docs/_build/html
+
+  finish:
+    needs: [test, docs]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Coveralls Finished
+        uses: AndreMiras/coveralls-python-action@v20201129
+        with:
+          parallel-finished: true
